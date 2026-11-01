@@ -1,2 +1,2 @@
 # GCCU
-gtag ccu tracker
+gt ccu tracker
