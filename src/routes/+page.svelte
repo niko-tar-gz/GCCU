@@ -389,6 +389,8 @@
                 {#each events as event (event.timestamp)}
                     {@const nearRightEdge =
                         x(event.timestamp) > chartWidth - 150}
+                    {@const oppositeSide = event.label === "Christmas 2025"}
+                    {@const labelOnLeft = oppositeSide ? !nearRightEdge : nearRightEdge}
                     <g>
                         <title>{event.label}: {stamp(event.timestamp)}</title>
                         <line
@@ -401,8 +403,8 @@
                             stroke-opacity="0.6"
                         />
                         <text
-                            transform={`translate(${x(event.timestamp) + (nearRightEdge ? -6 : 6)}, ${nearRightEdge ? 105 : 32}) rotate(35)`}
-                            text-anchor={nearRightEdge ? "end" : "start"}
+                            transform={`translate(${x(event.timestamp) + (labelOnLeft ? -6 : 6)}, ${nearRightEdge ? 105 : 32}) rotate(${oppositeSide ? -35 : 35})`}
+                            text-anchor={labelOnLeft ? "end" : "start"}
                             class="fill-muted-foreground text-[11px]"
                             stroke="var(--background)"
                             stroke-width="3"
