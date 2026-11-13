@@ -8,6 +8,7 @@
     import ChevronLeft from "@lucide/svelte/icons/chevron-left";
     import ChevronRight from "@lucide/svelte/icons/chevron-right";
     import { downsample, timeframes, type Reading } from "#lib/ccu.js";
+    import { eventsInRange } from "#lib/events.js";
 
     let timeframe = $state("1d");
     let records = $state<Reading[]>([]);
@@ -19,6 +20,12 @@
     let hovered = $state<Reading | null>(null);
     let custom = $state(false);
     let chartWidth = $state(1000);
+    let selection = $state<{
+        pointerId: number;
+        anchor: number;
+        cursor: number;
+        clientX: number;
+    } | null>(null);
     let controller: AbortController | undefined;
     const number = new Intl.NumberFormat("en-GB");
     const date = (time: number) => new Date(time).toISOString().slice(0, 10);
@@ -36,6 +43,7 @@
         ),
     );
     let plotted = $derived(downsample(visible));
+    let events = $derived(eventsInRange(start, end));
     let ceiling = $derived(
         Math.max(1, ...plotted.map((point) => point.ccu)) * 1.1,
     );
@@ -61,6 +69,7 @@
         loading = true;
         message = "";
         hovered = null;
+        selection = null;
         try {
             const latestResponse = await fetch("/api/ccu", {
                 signal: request.signal,
@@ -121,18 +130,81 @@
         void load(false);
     }
 
-    function inspect(event: PointerEvent) {
+    function chartPosition(event: PointerEvent) {
         const bounds =
             event.currentTarget instanceof SVGElement
                 ? event.currentTarget.getBoundingClientRect()
                 : null;
-        if (!bounds || !visible.length) return;
-        const target =
-            start +
-            ((((event.clientX - bounds.left) / bounds.width) * chartWidth -
-                56) /
-                (chartWidth - 72)) *
-                (end - start);
+        if (!bounds || !bounds.width || chartWidth <= 72) return null;
+        return {
+            x: ((event.clientX - bounds.left) / bounds.width) * chartWidth,
+            y: ((event.clientY - bounds.top) / bounds.height) * 380,
+        };
+    }
+
+    const clampX = (position: number) =>
+        Math.max(56, Math.min(chartWidth - 16, position));
+    const timeAt = (position: number) =>
+        start + ((position - 56) / (chartWidth - 72)) * (end - start);
+
+    function beginSelection(event: PointerEvent) {
+        if (
+            event.button !== 0 ||
+            !event.isPrimary ||
+            loading ||
+            message ||
+            !visible.length
+        )
+            return;
+        const position = chartPosition(event);
+        if (
+            !position ||
+            position.x < 56 ||
+            position.x > chartWidth - 16 ||
+            position.y < 24 ||
+            position.y > 330
+        )
+            return;
+        (event.currentTarget as SVGSVGElement).setPointerCapture(
+            event.pointerId,
+        );
+        selection = {
+            pointerId: event.pointerId,
+            anchor: position.x,
+            cursor: position.x,
+            clientX: event.clientX,
+        };
+        hovered = null;
+    }
+
+    function finishSelection(event: PointerEvent) {
+        if (!selection || selection.pointerId !== event.pointerId) return;
+        const drag = selection;
+        const position = chartPosition(event);
+        selection = null;
+        (event.currentTarget as SVGSVGElement).releasePointerCapture(
+            event.pointerId,
+        );
+        if (!position || Math.abs(event.clientX - drag.clientX) < 5) return;
+        const from = timeAt(Math.min(drag.anchor, clampX(position.x)));
+        const to = timeAt(Math.max(drag.anchor, clampX(position.x)));
+        if (to - from < 60_000) return;
+        start = from;
+        end = to;
+        custom = true;
+        void load(false);
+    }
+
+    function inspect(event: PointerEvent) {
+        const position = chartPosition(event);
+        if (!position) return;
+        if (selection) {
+            if (selection.pointerId === event.pointerId)
+                selection.cursor = clampX(position.x);
+            return;
+        }
+        if (loading || !visible.length) return;
+        const target = timeAt(clampX(position.x));
         let low = 0,
             high = visible.length - 1;
         while (low < high) {
@@ -165,15 +237,15 @@
     <header class="mb-8 flex items-baseline justify-between gap-4">
         <h1 class="text-xl font-semibold">GCCU</h1>
         <div class="flex items-center gap-3">
-        {#if current}
-            <p class="text-sm text-muted-foreground">
-                Current <span
-                    class="ml-2 text-xl font-semibold tabular-nums text-foreground"
-                    >{number.format(current.ccu)}</span
-                >
-            </p>
-        {/if}
-        <ThemeToggle />
+            {#if current}
+                <p class="text-sm text-muted-foreground">
+                    Current <span
+                        class="ml-2 text-xl font-semibold tabular-nums text-foreground"
+                        >{number.format(current.ccu)}</span
+                    >
+                </p>
+            {/if}
+            <ThemeToggle />
         </div>
     </header>
     <div class="flex flex-wrap items-center justify-between gap-3">
@@ -254,10 +326,15 @@
         <svg
             viewBox={`0 0 ${chartWidth} 380`}
             preserveAspectRatio="none"
-            class="h-[320px] w-full sm:h-[430px]"
+            class="h-[320px] w-full touch-pan-y select-none sm:h-[430px]"
+            style:cursor={loading ? "wait" : "crosshair"}
             role="img"
             aria-label="Concurrent users over time"
+            onpointerdown={beginSelection}
             onpointermove={inspect}
+            onpointerup={finishSelection}
+            onpointercancel={() => (selection = null)}
+            onlostpointercapture={() => (selection = null)}
             onpointerleave={() => (hovered = null)}
         >
             {#each [0, 0.25, 0.5, 0.75, 1] as fraction}
@@ -307,6 +384,54 @@
                         fill="var(--foreground)"
                     />
                 {/if}
+            {/if}
+            {#if current && !loading && !message}
+                {#each events as event (event.timestamp)}
+                    {@const nearRightEdge =
+                        x(event.timestamp) > chartWidth - 150}
+                    <g>
+                        <title>{event.label}: {stamp(event.timestamp)}</title>
+                        <line
+                            x1={x(event.timestamp)}
+                            x2={x(event.timestamp)}
+                            y1="24"
+                            y2="330"
+                            stroke="var(--muted-foreground)"
+                            stroke-dasharray="5 5"
+                            stroke-opacity="0.6"
+                        />
+                        <text
+                            transform={`translate(${x(event.timestamp) + (nearRightEdge ? -6 : 6)}, ${nearRightEdge ? 105 : 32}) rotate(35)`}
+                            text-anchor={nearRightEdge ? "end" : "start"}
+                            class="fill-muted-foreground text-[11px]"
+                            stroke="var(--background)"
+                            stroke-width="3"
+                            paint-order="stroke"
+                            stroke-linejoin="round">{event.label}</text
+                        >
+                    </g>
+                {/each}
+            {/if}
+            {#if selection}
+                <rect
+                    x={Math.min(selection.anchor, selection.cursor)}
+                    y="24"
+                    width={Math.abs(selection.cursor - selection.anchor)}
+                    height="306"
+                    fill="var(--foreground)"
+                    fill-opacity="0.1"
+                    pointer-events="none"
+                />
+                {#each [selection.anchor, selection.cursor] as edge}
+                    <line
+                        x1={edge}
+                        x2={edge}
+                        y1="24"
+                        y2="330"
+                        stroke="var(--muted-foreground)"
+                        pointer-events="none"
+                    />
+                {/each}
             {/if}
             {#if current}
                 {#each chartWidth < 500 ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1] as fraction}
